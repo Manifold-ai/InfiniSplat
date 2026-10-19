@@ -105,7 +105,7 @@ class InfiniSplat(nn.Module):
             ext = torch.cat([ext,row],-2)
         return torch.linalg.inv(ext), geometry.intrinsics.float()
 
-    def _da3(self, images, c2w, K):
+    def _da3(self, images, c2w, K, *, panorama_shared_center=False):
         n = images.shape[1]
         w2c = aligned = baseline = None
         if c2w is not None:
@@ -165,20 +165,33 @@ class InfiniSplat(nn.Module):
         if c2w is not None:
             meta = dict(alignment_pred_extrinsics=extrinsics, alignment_gt_extrinsics=w2c,
                         alignment_gt_c2w=aligned, alignment_gt_depth_scale=baseline)
-            effective_c2w, _ = align_rdnorm_gt_via_legacy_da3(meta, radius)
+            if panorama_shared_center:
+                # Pure rotation has no identifiable baseline scale. Preserve the
+                # native depth/radius normalization and exact local rotations.
+                effective_c2w = aligned.float().clone()
+                effective_c2w[..., :3, 3] = 0
+            else:
+                effective_c2w, _ = align_rdnorm_gt_via_legacy_da3(meta, radius)
             effective_K = K
         else:
             effective_c2w, effective_K = predicted_c2w, predicted_K
         return tokens, 0, depth, effective_c2w, effective_K, radius
 
     @torch.inference_mode()
-    def forward(self, images, c2w=None, intrinsics=None):
+    def forward(self, images, c2w=None, intrinsics=None, *, panorama_shared_center=False):
         if images.ndim != 5 or images.shape[0]!=1 or images.shape[2]!=3:
             raise ValueError('Expected RGB tensor [1,views,3,height,width]')
         if (c2w is None)!=(intrinsics is None):
             raise ValueError('Provide both c2w and pixel intrinsics, or neither')
+        if panorama_shared_center:
+            if c2w is None:
+                raise ValueError('Panorama reconstruction requires calibrated cameras')
+            centers = c2w.float()[..., :3, 3]
+            if not torch.allclose(centers, centers[:, :1].expand_as(centers), atol=1e-7, rtol=0):
+                raise ValueError('Panorama reconstruction requires a shared camera center')
         with torch.autocast(device_type=images.device.type,dtype=torch.bfloat16,enabled=images.is_cuda):
-            tokens,start,depth,poses,K,radius=self._da3(images,c2w,intrinsics)
+            tokens,start,depth,poses,K,radius=self._da3(
+                images,c2w,intrinsics,panorama_shared_center=panorama_shared_center)
             # Avoid retaining dense 128-channel features for every view.
             parts=[]
             for i in range(images.shape[1]):

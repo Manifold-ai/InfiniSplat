@@ -46,7 +46,7 @@ InfiniSplat v2 reconstructs 3D Gaussian scenes from multiple images, with or wit
 camera poses, for novel-view rendering.
 
 [Install](INSTALL.md) · [Examples](examples/README.md) · [COLMAP](docs/colmap.md) ·
-[Inference guide](docs/inference.md)
+[Inference guide](docs/inference.md) · [360° panorama → 3DGS](docs/panorama.md)
 
 ## 🚀 Quick start
 
@@ -100,3 +100,10 @@ We sincerely thank the authors of [Depth Anything 3](https://github.com/ByteDanc
 InfiniSplat v2 uses the same [Project Registration License (PRL) v1.0](LICENSE)
 as v1. Third-party components retain their respective licenses and notices; see
 [THIRD_PARTY.md](THIRD_PARTY.md), `License.txt`, `Notice.txt` and `LICENSE_DA3`.
+
+## 360° panorama reconstruction
+
+Convert a full equirectangular panorama into a native Gaussian scene with
+`infinisplat-panorama`. See the [panorama guide](docs/panorama.md) for installation
+and the included `small_empty_house` example. This workflow was inspired by
+[Enndee](https://github.com/Enndee).

@@ -136,3 +136,8 @@ V1 and v2 share the project license above. Third-party components retain their r
 ## Acknowledgments
 
 See the [v1 acknowledgments](InfiniSplat_v1/README.md#-acknowledgments) and [v2 acknowledgments](InfiniSplat_v2/README.md#acknowledgments).
+
+### Panorama to 3DGS (v2)
+
+[Reconstruct a 360° panorama](InfiniSplat_v2/docs/panorama.md) with the included
+`small_empty_house` example. Inspired by [Enndee](https://github.com/Enndee).

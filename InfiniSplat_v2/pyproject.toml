@@ -7,7 +7,7 @@ name = "infinisplat"
 version = "2.0.0"
 description = "InfiniSplat v2: feed-forward Gaussian reconstruction from multiple images"
 readme = "README.md"
-license-files = ["LICENSE", "LICENSE_DA3", "License.txt", "Notice.txt", "THIRD_PARTY.md", "examples/NOTICE.md"]
+license-files = ["LICENSE", "LICENSE_DA3", "License.txt", "Notice.txt", "THIRD_PARTY.md", "examples/NOTICE.md", "examples/panorama/NOTICE.md"]
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "torch>=2.5", "numpy>=1.24,<2", "Pillow>=10", "einops>=0.8",
@@ -15,8 +15,12 @@ dependencies = [
   "omegaconf>=2.3", "addict>=2.4", "evo>=1.30,<2",
 ]
 
+[project.optional-dependencies]
+panorama = ["opencv-python-headless>=4.8,<4.12"]
+
 [project.scripts]
 infinisplat = "infinisplat.cli:main"
+infinisplat-panorama = "infinisplat.panorama_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

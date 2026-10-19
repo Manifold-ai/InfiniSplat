@@ -33,3 +33,6 @@ available and requests citation of its accompanying paper.
 
 Please cite Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola, and
 Henrik Aanæs, **Large Scale Multi-view Stereopsis Evaluation**, CVPR 2014.
+
+The bundled `panorama/small_empty_house.jpg` is a CC0 Poly Haven panorama; see
+[its attribution](panorama/NOTICE.md).

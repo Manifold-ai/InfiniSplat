@@ -96,7 +96,8 @@ class Pipeline:
         return cls(model,cfg,device)
 
     @torch.inference_mode()
-    def reconstruct(self, images, cameras=None, long_side=518, max_views=12, pose_mode=None):
+    def reconstruct(self, images, cameras=None, long_side=518, max_views=12, pose_mode=None,
+                    panorama_shared_center=False):
         images = list(images)
         pose_mode = pose_mode or ('provided' if cameras is not None else 'da3-pose')
         if pose_mode not in ('provided', 'da3-pose', 'pose-free'):
@@ -107,6 +108,11 @@ class Pipeline:
         if cameras is not None:
             cameras=validate_cameras(cameras, images)
             c2w,K=cameras['c2w'],cameras['intrinsics']
+        if panorama_shared_center:
+            if cameras is None:
+                raise ValueError('Panorama mode requires provided cameras')
+            if not np.allclose(c2w[:, :3, 3], c2w[:1, :3, 3], atol=1e-7, rtol=0):
+                raise ValueError('Panorama mode requires a shared camera center')
         pixels,K,records=prepare_images(images,long_side,K,max_views=max_views)
         pixels_device = pixels.to(self.device)
         pose_tensor = None if c2w is None else torch.from_numpy(c2w)[None].to(self.device)
@@ -120,7 +126,8 @@ class Pipeline:
                 raise ValueError('Invalid DA3 camera prior')
             prior = dict(c2w=pose_tensor[0].detach().cpu().clone(),
                          intrinsics=K_tensor[0].detach().cpu().clone())
-        result=self.model(pixels_device, pose_tensor, K_tensor)
+        kwargs = {'panorama_shared_center': True} if panorama_shared_center else {}
+        result=self.model(pixels_device, pose_tensor, K_tensor, **kwargs)
         result['images']=pixels[0]
         result['metadata']=dict(backend=self.config['backend'],
              weights_sha256=self.config['weights_sha256'],
@@ -129,6 +136,16 @@ class Pipeline:
              inputs=records,space='rdnorm_first_camera_relative',stats=result['stats'],
              record_class='diagnostic',max_gaussians=0,
              note='Interactive reconstruction; not a formal benchmark acceptance record.')
+        if panorama_shared_center:
+            result['metadata']['panorama'] = dict(
+                scale_status='non_identifiable', translation_scale=None,
+                baseline_scale_fit_attempted=False, pose_prepass_attempted=False,
+                normalization=self.config['normalization'],
+                condition_pose_source='provided_shared_center',
+                condition_intrinsics_source='provided',
+                unprojection_pose_source='provided_first_camera_relative_zero_center',
+                unprojection_intrinsics_source='provided',
+                render_pose_source='effective_unprojection_cameras')
         if prior is not None:
             result['camera_prior'] = prior
             result['metadata']['camera_prior'] = dict(
