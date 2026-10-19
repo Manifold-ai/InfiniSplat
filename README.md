@@ -60,7 +60,7 @@
 
 InfiniSplat v2 reconstructs 3D Gaussian scenes from multiple images, with or without camera poses, for novel-view rendering.
 
-[Code and usage](InfiniSplat_v2/README.md) · [Installation](InfiniSplat_v2/INSTALL.md) · [Inference guide](InfiniSplat_v2/docs/inference.md) · [COLMAP guide](InfiniSplat_v2/docs/colmap.md)
+[Code and usage](InfiniSplat_v2/README.md) · [Installation](InfiniSplat_v2/INSTALL.md) · [Inference guide](InfiniSplat_v2/docs/inference.md) · [COLMAP guide](InfiniSplat_v2/docs/colmap.md) · [360° panorama → 3DGS](docs/panorama.md)
 
 ---
 
