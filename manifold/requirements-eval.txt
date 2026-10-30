@@ -1,0 +1,9 @@
+# Extra packages for manifold/atlas_eval, installed into the InfiniSplat_v2 environment
+# after its INSTALL.md (CUDA PyTorch, the pinned DA3 and `pip install .`).
+numpy<2
+Pillow>=10
+plyfile>=1.0
+opencv-python-headless>=4.8,<4.12  # EXR / 16-bit PNG depth
+gsplat>=1.4                         # render_eval only; builds against the installed CUDA PyTorch
+lpips>=0.1.4                        # render_eval only
+pytest>=8                           # manifold/tests (CPU only)
