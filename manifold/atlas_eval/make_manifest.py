@@ -1,9 +1,11 @@
-"""Write manifest.json for a scene folder: from an Atlas scene export, or from plain photos."""
+"""Write manifest.json for a scene folder: from an Atlas scene export, plain photos, or one panorama."""
 import argparse
 import json
 from pathlib import Path
-from .manifest import IMAGE_SUFFIXES, SCHEMA, load, sha256
+from PIL import Image
+from .manifest import IMAGE_SUFFIXES, SCHEMA, is_equirect_size, load, sha256
 
+PANORAMA_DEPTH_SUFFIXES = ('.exr', '.npy', '.png')
 # File names of an Atlas scene export (one folder per scene).
 ATLAS_JSON = 'atlas-scene.json'
 IMAGE = 'scene-{view_id}.png'
@@ -59,14 +61,50 @@ def from_atlas(root, test_create=None, test_every=4, verify=True):
                 views=views)
 
 
+def _images(root):
+    return sorted(p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+
+
 def from_images(root):
     """Every photo directly inside the folder, in filename order, as an unposed input view."""
     root = Path(root)
-    images = sorted(p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+    images = _images(root)
     if not images:
         raise ValueError(f'{root}: no PNG, JPG or WebP images')
+    if len(images) == 1:
+        with Image.open(root / images[0]) as im:
+            if is_equirect_size(*im.size):
+                raise ValueError(f'{images[0]} is 2:1, a panorama: use `make_manifest pano` (one photo would run v1)')
     views = [dict(view_id=Path(name).stem, origin='photo', role='input', image=name) for name in images]
     return dict(schema=SCHEMA, name=root.name, source=dict(kind='images'), views=views)
+
+
+def from_panorama(root, log_bounds=None):
+    """The one 2:1 panorama directly inside the folder, with an optional range map <stem>-depth.(exr|npy|png)
+    (log PNG needs log_bounds=(min, max)) and confidence <stem>-confidence.png."""
+    root = Path(root)
+    images = [n for n in _images(root) if not Path(n).stem.endswith(('-depth', '-confidence'))]
+    if len(images) != 1:
+        raise ValueError(f'{root}: a panorama scene folder holds exactly one image, found {len(images)}')
+    name = images[0]
+    stem = Path(name).stem
+    view = dict(view_id=stem, origin='photo', role='input', projection='equirect', image=name)
+    depths = [f'{stem}-depth{s}' for s in PANORAMA_DEPTH_SUFFIXES if (root / f'{stem}-depth{s}').is_file()]
+    if len(depths) > 1:
+        raise ValueError(f'{root}: more than one range map: {depths}')
+    if depths:
+        fmt = Path(depths[0]).suffix.lstrip('.')
+        depth = dict(file=depths[0], kind='range', encoding='log' if fmt == 'png' else 'linear', format=fmt)
+        if fmt == 'png':
+            if log_bounds is None:
+                raise ValueError(f'{depths[0]}: a PNG range map is log encoded; pass --log-bounds MIN MAX')
+            depth.update(z_min=log_bounds[0], z_max=log_bounds[1])
+        view['depth'] = depth
+        if (root / f'{stem}-confidence.png').is_file():
+            view['confidence'] = f'{stem}-confidence.png'
+    elif log_bounds is not None:
+        raise ValueError('--log-bounds given but there is no range map')
+    return dict(schema=SCHEMA, name=root.name, source=dict(kind='panorama'), views=[view])
 
 
 def main():
@@ -79,7 +117,11 @@ def main():
     atlas.add_argument('--no-verify', action='store_true', help='Skip the sha256/size check against the JSON')
     images = sub.add_parser('images', help='Folder of photos without cameras')
     images.add_argument('scene_dir', type=Path)
-    for p in (atlas, images):
+    pano = sub.add_parser('pano', help='Folder with one 2:1 panorama, optionally <stem>-depth.* (range map)')
+    pano.add_argument('scene_dir', type=Path)
+    pano.add_argument('--log-bounds', type=float, nargs=2, metavar=('MIN', 'MAX'),
+                      help='Range bounds of a log-encoded PNG range map')
+    for p in (atlas, images, pano):
         p.add_argument('--manifest', default='manifest.json')
         p.add_argument('--force', action='store_true', help='Replace an existing manifest')
     args = parser.parse_args()
@@ -87,8 +129,12 @@ def main():
     if out.exists() and not args.force:
         parser.error(f'{out} exists; pass --force to replace it')
     try:
-        data = (from_atlas(args.scene_dir, args.test_create, args.test_every, not args.no_verify)
-                if args.source == 'atlas' else from_images(args.scene_dir))
+        if args.source == 'atlas':
+            data = from_atlas(args.scene_dir, args.test_create, args.test_every, not args.no_verify)
+        elif args.source == 'pano':
+            data = from_panorama(args.scene_dir, args.log_bounds)
+        else:
+            data = from_images(args.scene_dir)
         staged = out.with_name(out.name + '.tmp')
         staged.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n')
         try:
@@ -99,7 +145,10 @@ def main():
         staged.replace(out)
     except (OSError, KeyError, ValueError) as error:
         parser.error(str(error))
-    print(f'{out}: {len(scene.inputs)} input, {len(scene.tests)} test views')
+    if scene.panorama is not None:
+        print(f'{out}: panorama {scene.panorama.view_id}, range map {"yes" if scene.panorama.depth else "no"}')
+    else:
+        print(f'{out}: {len(scene.inputs)} input, {len(scene.tests)} test views')
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 """Reconstruct scene folders: one input view runs v1 (single image, optional depth prompt),
-two or more run v2 (multi-view). Writes runs/<scene>/<arm>/ with the PLY and run.json."""
+two or more run v2 (multi-view), an equirect panorama runs v2's panorama path (produce only).
+Writes runs/<scene>/<arm>/ with the PLY and run.json."""
 import argparse
 import json
 import platform
@@ -10,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
+from . import panorama
 from .manifest import load, select_inputs, sha256, valid_depth
 from .splat_io import vertex_count
 
@@ -17,6 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 RUN_SCHEMA = 'infinisplat-atlas-eval-run/1'
 V2_MODES = ('provided', 'da3-pose', 'pose-free')
 V1_MODES = {'v1-rgb': 'rgb', 'v1-lidar': 'lidar'}
+PANORAMA = 'panorama'
 ARMS = {
     'I1': dict(mode='provided', long_side=518),
     'I1-v5': dict(mode='provided', long_side=518, inputs=5),
@@ -25,6 +28,7 @@ ARMS = {
     'I3': dict(mode='da3-pose', long_side=518),
     'S-rgb': dict(mode='v1-rgb', inputs=1),
     'S-depth': dict(mode='v1-lidar', inputs=1),
+    'P': dict(mode=PANORAMA, long_side=768),
 }
 # Seeds the unseeded prompt-depth sampling of v1 and reports peak CUDA memory on exit.
 V1_WRAPPER = '''import atexit, random, runpy, sys
@@ -40,15 +44,17 @@ runpy.run_module('src.demo.infer_batch_images', run_name='__main__', alter_sys=T
 
 
 def parse_arm(text):
-    """A preset name, or NAME=MODE[:LONG_SIDE[:INPUTS]] such as X=provided:1022:17."""
+    """A preset name, or NAME=MODE[:LONG_SIDE[:INPUTS]] such as X=provided:1022:17 or X=panorama:518."""
     if '=' not in text:
         if text not in ARMS:
             raise ValueError(f'unknown arm {text!r}; presets: {", ".join(ARMS)}')
         return text, dict(ARMS[text])
     name, _, value = text.partition('=')
     mode, *rest = value.split(':')
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) or mode not in V2_MODES + tuple(V1_MODES):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) or mode not in V2_MODES + tuple(V1_MODES) + (PANORAMA,):
         raise ValueError(f'bad arm {text!r}')
+    if mode == PANORAMA and len(rest) > 1:
+        raise ValueError(f'{text!r}: a panorama arm takes LONG_SIDE only (its one input is the panorama)')
     spec = dict(mode=mode)
     if rest and rest[0]:
         spec['long_side'] = int(rest[0])
@@ -58,6 +64,8 @@ def parse_arm(text):
 
 
 def auto_arms(scene):
+    if scene.panorama is not None:
+        return ['P']
     if len(scene.inputs) >= 2:
         return ['I1']
     return ['S-rgb'] + (['S-depth'] if scene.inputs[0].depth is not None else [])
@@ -66,6 +74,14 @@ def auto_arms(scene):
 def plan(scene, name, spec):
     """Check one arm against one scene; returns (spec with defaults, input views)."""
     spec = dict(spec)
+    if (spec['mode'] == PANORAMA) != (scene.panorama is not None):
+        raise ValueError(f'{name}: the panorama arm runs only on, and is the only arm of, a panorama scene')
+    if spec['mode'] == PANORAMA:
+        spec.setdefault('long_side', 768)
+        if not 112 <= spec['long_side'] <= 2044:
+            raise ValueError(f'{name}: long_side must be 112-2044')
+        spec['backend'] = 'v2-panorama'
+        return spec, (scene.panorama,)
     v1 = spec['mode'] in V1_MODES
     views = select_inputs(scene, spec.get('inputs', 1 if v1 else None))
     if v1:
@@ -99,13 +115,23 @@ class V2:
     def __init__(self, model, device):
         self.model, self.device, self.pipeline, self.load_s = model, device, None, None
 
-    def __call__(self, views, spec, out):
-        import torch
-        from infinisplat import Pipeline, export_ply
+    def _load(self):
+        from infinisplat import Pipeline
         if self.pipeline is None:
             start = time.perf_counter()
             self.pipeline = Pipeline.from_pretrained(self.model, self.device)
             self.load_s = time.perf_counter() - start
+        return self.pipeline
+
+    def panorama(self, view, spec, out, args):
+        record = panorama.reconstruct(self._load(), view, spec, out, self.device, args.html, args.min_confidence)
+        record['timing_s']['model_load'] = self.load_s
+        return record
+
+    def __call__(self, views, spec, out):
+        import torch
+        from infinisplat import export_ply
+        self._load()
         cameras = None
         if spec['mode'] == 'provided':
             cameras = dict(c2w=np.stack([v.c2w for v in views]).astype(np.float32),
@@ -182,7 +208,12 @@ def execute(scene, name, spec, views, out, args, v2):
                   created_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),
                   host=dict(python=platform.python_version(), git_commit=_git_commit()))
     try:
-        record.update(v2(views, spec, out) if spec['backend'] == 'v2' else run_v1(views[0], spec, out, args))
+        if spec['backend'] == 'v2-panorama':
+            record.update(v2.panorama(views[0], spec, out, args))
+        elif spec['backend'] == 'v2':
+            record.update(v2(views, spec, out))
+        else:
+            record.update(run_v1(views[0], spec, out, args))
         ply = out / record['ply']
         record.update(gaussians=vertex_count(ply), ply_bytes=ply.stat().st_size)
     except Exception as error:  # Keep going through the matrix; the failure is recorded in place.
@@ -203,7 +234,10 @@ def main():
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--v1-root', type=Path, default=REPO / 'InfiniSplat_v1')
     parser.add_argument('--v1-python', default=sys.executable, help='Python of the v1 environment')
-    parser.add_argument('--min-confidence', type=float, default=0.0, help='Depth prompt pixels below it are dropped')
+    parser.add_argument('--min-confidence', type=float, default=0.0,
+                        help='Depth pixels below it are dropped (v1 depth prompt, panorama scale)')
+    parser.add_argument('--html', action='store_true',
+                        help='Panorama arm: also write scene.html (needs splat-transform, see the panorama guide)')
     parser.add_argument('--skip-existing', action='store_true', help='Skip arms whose run.json says ok')
     parser.add_argument('--dry-run', action='store_true', help='Print the matrix and exit')
     args = parser.parse_args()

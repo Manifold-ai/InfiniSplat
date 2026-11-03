@@ -27,6 +27,8 @@ def compute(scene, arm_dir):
             raise ValueError(f'{arm_dir}: input view has no manifest camera')
         return camera_frame(view.c2w, frame['scale']), dict(method='input_camera', scale_source=
                                                              'depth_prompt' if frame['scale'] else 'render')
+    if frame['kind'] == 'panorama':
+        raise ValueError(f'{arm_dir}: panorama arms are produce-only; there is no world pose to align or score against')
     if frame['kind'] == 'world':
         rotation = np.eye(3) if frame['rotation'] is None else np.asarray(frame['rotation'])
         return Sim3(rotation, np.zeros(3), 1.0), dict(method='fixed')

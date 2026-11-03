@@ -8,12 +8,19 @@ from pathlib import Path
 import numpy as np
 from .geometry import intrinsics_matrix, opencv_c2w
 
-SCHEMA = 'infinisplat-atlas-eval/1'
+SCHEMA = 'infinisplat-atlas-eval/2'
+SCHEMAS = ('infinisplat-atlas-eval/1', SCHEMA)  # /2 adds equirect panoramas and range depth
 ROLES = ('input', 'test')
+PROJECTIONS = ('pinhole', 'equirect')
+DEPTH_KINDS = ('z', 'range')  # z: along the optical axis (pinhole); range: distance to the centre (equirect)
 ORIGINS = ('create', 'generate', 'photo')
 IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.webp')
 DEPTH_FORMATS = ('exr', 'png', 'npy')
 _ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+# What infinisplat-panorama accepts (InfiniSplat_v2/src/infinisplat/panorama.py, slice_panorama).
+EQUIRECT_ASPECT_TOLERANCE = 0.005
+EQUIRECT_MAX_PIXELS = 128_000_000
+EQUIRECT_MAX_EDGE = 32767
 
 
 def sha256(path):
@@ -31,6 +38,7 @@ class Depth:
     format: str
     z_min: float | None
     z_max: float | None
+    kind: str = 'z'
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,7 @@ class View:
     c2w: np.ndarray | None
     depth: Depth | None
     confidence: Path | None
+    projection: str = 'pinhole'
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,11 @@ class Scene:
 
     def view(self, view_id):
         return next(v for v in self.views if v.view_id == view_id)
+
+    @property
+    def panorama(self):
+        """The equirect input view of a panorama scene, else None."""
+        return next((v for v in self.views if v.projection == 'equirect'), None)
 
 
 def _file(root, value, what):
@@ -101,7 +115,29 @@ def _camera(camera, view_id):
     return intrinsics_matrix(fx, fy, cx, cy), size, c2w
 
 
-def _depth(root, depth, view_id):
+def is_equirect_size(width, height):
+    return abs(width / height - 2) <= EQUIRECT_ASPECT_TOLERANCE
+
+
+def check_equirect(path, what):
+    """Refuse what infinisplat-panorama would refuse, before any GPU work."""
+    import warnings
+    from PIL import Image
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', Image.DecompressionBombWarning)
+        with Image.open(path) as im:
+            if im.format not in ('JPEG', 'PNG', 'WEBP'):
+                raise ValueError(f'{what}: panorama must be an RGB JPG, PNG or WebP (no HDR / EXR)')
+            if im.width * im.height > EQUIRECT_MAX_PIXELS or max(im.size) >= EQUIRECT_MAX_EDGE:
+                raise ValueError(f'{what}: panorama must be at most 128 megapixels and below 32767 pixels per edge')
+            if im.getexif().get(274, 1) != 1:
+                raise ValueError(f'{what}: remove the EXIF orientation from the panorama first')
+            if not is_equirect_size(*im.size):
+                raise ValueError(f'{what}: {im.width}x{im.height} is not a full 2:1 equirectangular panorama')
+            return im.size
+
+
+def _depth(root, depth, view_id, projection='pinhole'):
     encoding, fmt = depth.get('encoding'), depth.get('format')
     path = _file(root, depth.get('file'), f'{view_id}: depth.file')
     fmt = fmt or path.suffix.lower().lstrip('.')
@@ -114,15 +150,20 @@ def _depth(root, depth, view_id):
     z_max = _number(depth['z_max'], f'{view_id}: z_max') if bounded else None
     if bounded and not 0 < z_min < z_max:
         raise ValueError(f'{view_id}: need 0 < z_min < z_max')
-    return Depth(path, encoding, fmt, z_min, z_max)
+    kind = depth.get('kind', 'z')
+    if kind not in DEPTH_KINDS:
+        raise ValueError(f'{view_id}: depth.kind must be one of {DEPTH_KINDS}')
+    if (kind == 'range') != (projection == 'equirect'):
+        raise ValueError(f'{view_id}: a panorama takes a range map (depth.kind "range"), a pinhole view z depth')
+    return Depth(path, encoding, fmt, z_min, z_max, kind)
 
 
 def load(scene_dir, manifest='manifest.json'):
     root = Path(scene_dir)
     path = root / manifest
     data = json.loads(path.read_text())
-    if data.get('schema') != SCHEMA:
-        raise ValueError(f'{path}: schema must be {SCHEMA}')
+    if data.get('schema') not in SCHEMAS:
+        raise ValueError(f'{path}: schema must be one of {SCHEMAS}')
     views, seen = [], set()
     for item in data.get('views', ()):
         view_id = item.get('view_id')
@@ -135,8 +176,15 @@ def load(scene_dir, manifest='manifest.json'):
         image = _file(root, item.get('image'), f'{view_id}: image')
         if image.suffix.lower() not in IMAGE_SUFFIXES:
             raise ValueError(f'{view_id}: image must be PNG, JPG or WebP')
+        projection = item.get('projection', 'pinhole')
+        if projection not in PROJECTIONS or (projection != 'pinhole' and data['schema'] != SCHEMA):
+            raise ValueError(f'{view_id}: projection must be one of {PROJECTIONS}; equirect needs schema {SCHEMA}')
         K = size = c2w = None
-        if item.get('camera') is not None:
+        if projection == 'equirect':
+            if role != 'input' or item.get('camera') is not None:
+                raise ValueError(f'{view_id}: a panorama is an input view without camera (it defines the frame)')
+            size = check_equirect(image, view_id)
+        elif item.get('camera') is not None:
             K, size, c2w = _camera(item['camera'], view_id)
             if size is not None:
                 from PIL import Image
@@ -145,12 +193,14 @@ def load(scene_dir, manifest='manifest.json'):
                         raise ValueError(f'{view_id}: image is {im.size}, intrinsics are for {size}')
         if role == 'test' and c2w is None:
             raise ValueError(f'{view_id}: test views need camera.extrinsics')
-        depth = _depth(root, item['depth'], view_id) if item.get('depth') else None
+        depth = _depth(root, item['depth'], view_id, projection) if item.get('depth') else None
         confidence = _file(root, item['confidence'], f'{view_id}: confidence') if item.get('confidence') else None
-        views.append(View(view_id, role, origin, image, size, K, c2w, depth, confidence))
+        views.append(View(view_id, role, origin, image, size, K, c2w, depth, confidence, projection))
     scene = Scene(root, path, data.get('name') or root.name, tuple(views))
     if not scene.inputs:
         raise ValueError(f'{path}: at least one input view is required')
+    if scene.panorama is not None and len(scene.views) != 1:
+        raise ValueError(f'{path}: a panorama scene holds exactly one view, the panorama (no world pose to place others)')
     posed = [v.c2w is not None for v in scene.inputs]
     if any(posed) and not all(posed):
         raise ValueError(f'{path}: give extrinsics for every input view or for none')
@@ -204,7 +254,8 @@ def log_depth(t, z_min, z_max):
 
 
 def read_depth(view):
-    """Camera-space z in manifest world units, float32 [H,W]; NaN or <= 0 means no geometry."""
+    """float32 [H,W] in the depth's own units: camera-space z (pinhole) or distance to the capture
+    centre (equirect range map, view.depth.kind == 'range'); NaN or <= 0 means no geometry."""
     depth = view.depth
     if depth is None:
         raise ValueError(f'{view.view_id} has no depth')

@@ -71,3 +71,41 @@ def write_atlas_scene(root, create=3, generate=8, removed=1, log_depth_views=(),
                  pose_refinement_accepted=True, views=views)
     (root / 'atlas-scene.json').write_text(json.dumps(scene, indent=2))
     return scene
+
+
+ROOM = (2.0, 1.5, 3.0)  # half extents of a box room around the capture centre, in metres
+
+
+def equirect_directions(height, width):
+    """Unit directions of equirect pixel centres: longitude 0 (+z) at the centre column, latitude up (-y)."""
+    rows, cols = np.mgrid[:height, :width]
+    lon = ((cols + .5) / width - .5) * 2 * np.pi
+    lat = (.5 - (rows + .5) / height) * np.pi
+    return np.stack([np.cos(lat) * np.sin(lon), -np.sin(lat), np.cos(lat) * np.cos(lon)], -1)
+
+
+def room_range(directions, half=ROOM):
+    """Distance from the centre to the walls of an axis-aligned box along unit directions [..., 3]."""
+    with np.errstate(divide='ignore'):
+        return np.min(np.asarray(half) / np.abs(directions), axis=-1)
+
+
+def write_panorama(root, stem='pano', size=(64, 32), depth=None, confidence=False):
+    """A 2:1 panorama JPG, optionally with a range map of ROOM (depth: 'exr', 'npy' or 'png' log 0.5-8)."""
+    root.mkdir(parents=True, exist_ok=True)
+    width, height = size
+    rgb = (np.random.default_rng(0).random((height, width, 3)) * 255).astype(np.uint8)
+    cv2.imwrite(str(root / f'{stem}.jpg'), rgb)
+    ranges = room_range(equirect_directions(height, width)).astype(np.float32)
+    if depth == 'exr':
+        cv2.imwrite(str(root / f'{stem}-depth.exr'), ranges)
+    elif depth == 'npy':
+        np.save(root / f'{stem}-depth.npy', ranges)
+    elif depth == 'png':
+        t = 1 - np.log(ranges / 0.5) / np.log(8.0 / 0.5)
+        cv2.imwrite(str(root / f'{stem}-depth.png'), np.round(t * 65535).astype(np.uint16))
+    if confidence:
+        conf = np.full((height, width), 255, np.uint8)
+        conf[: height // 2] = 0  # the upper half is untrusted
+        cv2.imwrite(str(root / f'{stem}-confidence.png'), conf)
+    return ranges
